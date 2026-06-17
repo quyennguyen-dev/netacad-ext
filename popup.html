@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>NetAcad AI</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --primary: #0f172a;
+      --accent: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, system-ui, sans-serif; }
+    body { width: 300px; background: var(--bg); color: var(--text); padding: 14px; font-size: 13px; }
+    h3 { text-align: center; font-size: 15px; margin-bottom: 12px; color: var(--primary); }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+    label { display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; }
+    input[type="password"] { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; margin-bottom: 8px; outline: none; }
+    input[type="password"]:focus { border-color: var(--accent); }
+    button { width: 100%; padding: 8px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; color: #fff; background: var(--primary); transition: opacity 0.15s; }
+    button:hover { opacity: 0.9; }
+    .toggle { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .toggle:last-child { margin-bottom: 0; }
+    .switch { position: relative; display: inline-block; width: 34px; height: 18px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #cbd5e1; transition: .2s; border-radius: 18px; }
+    .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background: #fff; transition: .2s; border-radius: 50%; }
+    input:checked + .slider { background: var(--accent); }
+    input:checked + .slider:before { transform: translateX(16px); }
+    #status { margin-top: 10px; font-weight: 500; text-align: center; color: var(--accent); min-height: 16px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+  <h3>⚡ NetAcad AI Assistant</h3>
+
+  <div class="card">
+    <label for="apiKey">Gemini API Key</label>
+    <input type="password" id="apiKey" placeholder="Nhập API Key..." autocomplete="off">
+    <button id="saveKey">💾 Lưu API Key</button>
+  </div>
+
+  <div class="card">
+    <div class="toggle">
+      <span>Hiển thị gợi ý AI</span>
+      <label class="switch"><input type="checkbox" id="showAnswersToggle" checked><span class="slider"></span></label>
+    </div>
+    <div class="toggle">
+      <span>Tự xử lý khi đổi trang</span>
+      <label class="switch"><input type="checkbox" id="processOnSwitchToggle" checked><span class="slider"></span></label>
+    </div>
+  </div>
+
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
