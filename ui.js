@@ -1,438 +1,491 @@
-function parseAiAnswers(rawText) {
-  if (!rawText) return [];
-  const chunks = rawText.split(/ \/\/\/ |[\n\r]+/);
-  return chunks.map(ans => ans.trim().replace(/\*\*|\*/g, "").replace(/^[-*•❑■▀✅=>]+\s*/, "").replace(/^([a-zA-Z]|\d{1,2})[.)\]]\s+/, "").replace(/^(option\s*)?\d*\s*of\s*\d*$/gi, "").trim()).filter(ans => ans.length > 0);
-}
+// ============================================================
+// ui.js — HIỂN THỊ KẾT QUẢ AI + TỰ CLICK ĐÁP ÁN
+// File này định nghĩa processSingleQuestion(viewElement, index, apiKey,
+// providedAnswer, isMatching, qData) — hàm mà scraper.js gọi cho mỗi
+// câu hỏi sau khi (hoặc trong khi) lấy đáp án từ AI.
+//
+// MỚI: mỗi khung hiển thị đáp án đều có nút "📋 Copy câu hỏi" và
+// "📋 Copy đáp án" để người dùng copy nhanh ra ngoài (vd để tự tra
+// hoặc lưu lại).
+// ============================================================
 
-const normalize = (str) => {
-  if (!str) return "";
-  let s = str.toLowerCase().replace(/\s+/g, ' ').trim();
-  return s.replace(/^([a-z]|\d{1,2})[.)\]]\s+/, "").replace(/option\s*\d*\s*of\s*\d*/gi, "").replace(/\b\d+\s+of\s+\d+\b/gi, "").replace(/[.,;:'"“”‘’\[\]{}()]/g, "").trim();
-};
+(function () {
+  "use strict";
 
-function dispatchClick(el) {
-  ['mousedown', 'mouseup', 'click'].forEach(type => {
-    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-  });
-}
+  const U = window.NetacadUtils || {};
+  const sleep = U.sleep || (ms => new Promise(r => setTimeout(r, ms)));
 
-function clickInputForLabel(labelEl) {
-  const forId = labelEl.getAttribute && labelEl.getAttribute("for");
-
-  // Strategy 1: Tìm input.mcq__item-input cùng shadow root với label (NetAcad pattern)
-  try {
-    const root = labelEl.getRootNode();
-    if (forId && root) {
-      // querySelector bằng id trong cùng shadow root
-      const inp = root.querySelector('#' + CSS.escape(forId));
-      if (inp) {
-        dispatchClick(inp);
-        if (!inp.checked) {
-          inp.checked = true;
-          inp.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return;
-      }
-    }
-  } catch(e) {}
-
-  // Strategy 2: Tìm input trong cùng .mcq__item (sibling của label)
-  try {
-    const mcqItem = labelEl.closest('.mcq__item');
-    if (mcqItem) {
-      const inp = mcqItem.querySelector('input.mcq__item-input, input[type="checkbox"], input[type="radio"]');
-      if (inp) {
-        dispatchClick(inp);
-        if (!inp.checked) {
-          inp.checked = true;
-          inp.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return;
-      }
-    }
-  } catch(e) {}
-
-  // Strategy 3: Click trực tiếp label với full mouse events
-  try { dispatchClick(labelEl); } catch(e) {}
-
-  // Strategy 4: Walk toàn bộ shadow DOM tìm input theo id
-  if (forId) {
-    try {
-      function findInShadow(root, id) {
-        if (!root) return null;
-        const el = root.querySelector('#' + CSS.escape(id));
-        if (el) return el;
-        for (const child of root.querySelectorAll('*')) {
-          if (child.shadowRoot) {
-            const found = findInShadow(child.shadowRoot, id);
-            if (found) return found;
-          }
-        }
-        return null;
-      }
-      const inp = findInShadow(document, forId);
-      if (inp) {
-        dispatchClick(inp);
-        if (!inp.checked) {
-          inp.checked = true;
-          inp.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }
-    } catch(e) {}
+  if (!window.NetacadUtils) {
+    console.error("[NetAcad] utils.js chưa load xong trước ui.js — kiểm tra thứ tự trong manifest.json");
   }
-}
 
-function autoSelectAnswers(answerElements, aiAnswerTexts, index) {
-  if (!answerElements || answerElements.length === 0 || !aiAnswerTexts || aiAnswerTexts.length === 0) return 0;
-  const normalizedAiAnswers = aiAnswerTexts.map(normalize);
-  let clickedCount = 0;
-  const clickedTexts = new Set();
-
-  answerElements.forEach((labelEl) => {
-    const rawText = labelEl.innerText || labelEl.textContent || '';
-    const labelText = normalize(rawText);
-    if (!labelText) return;
-
-    const isMatch = normalizedAiAnswers.some(aiAns => {
-      const cleanAiAns = aiAns.replace(/[.,;:'""''\[\]{}()]/g, "");
-      return labelText === cleanAiAns || 
-             (labelText.length > 3 && cleanAiAns.includes(labelText)) || 
-             (cleanAiAns.length > 3 && labelText.includes(cleanAiAns));
-    });
-
-    if (isMatch && !clickedTexts.has(labelText)) {
-      clickInputForLabel(labelEl);
-      clickedTexts.add(labelText);
-      clickedCount++;
-    }
-  });
-
-  // Verify & retry: nếu input vẫn chưa checked, thử lại lần 2
-  answerElements.forEach((labelEl) => {
-    const rawText = labelEl.innerText || labelEl.textContent || '';
-    const labelText = normalize(rawText);
-    if (!clickedTexts.has(labelText)) return;
-    try {
-      const container = labelEl.closest('.mcq__item, .mcq__option, .option, [class*="item"]') || labelEl.parentElement;
-      const inp = container && container.querySelector('input[type="radio"], input[type="checkbox"]');
-      if (inp && !inp.checked) {
-        inp.click(); // retry
-      }
-    } catch(e) {}
-  });
-
-  return clickedCount;
-}
-
-
-// ==========================================
-// ENGINE 1: DRAG & DROP
-// ==========================================
-function simulateDragAndDrop(sourceNode, targetNode) {
-  const dataTransfer = new DataTransfer();
-  ['dragstart', 'dragenter', 'dragover', 'drop', 'dragend'].forEach(type => {
-    const node = (type === 'dragstart' || type === 'dragend') ? sourceNode : targetNode;
-    node.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer }));
-  });
-}
-
-function autoMatchDragDrop(sourceElements, targetElements, aiMappingJSON) {
-  let matchCount = 0;
-  try {
-    const mapping = JSON.parse(aiMappingJSON.replace(/```json/gi, "").replace(/```/g, ""));
-    Object.keys(mapping).forEach(categoryKey => {
-      const targetObj = Array.from(targetElements).find(el => normalize(el.innerText || "").includes(normalize(categoryKey)));
-      const sourceObj = Array.from(sourceElements).find(el => normalize(el.innerText || "").includes(normalize(mapping[categoryKey])));
-      if (targetObj && sourceObj) { simulateDragAndDrop(sourceObj, targetObj); matchCount++; }
-    });
-  } catch (e) {}
-  return matchCount;
-}
-
-// ==========================================
-// ENGINE 3: LINE MATCHING (objectMatching - Click nối A-B-C)
-// ==========================================
-async function autoMatchLinePairs(aiMappingJSON, viewElement) {
-  let matchCount = 0;
-  try {
-    const mapping = JSON.parse(aiMappingJSON.replace(/```json/gi, "").replace(/```/g, "").trim());
-    // objectMatching là div thường (không có shadowRoot) — dùng element trực tiếp
-    const root = viewElement.shadowRoot || viewElement;
-    if (!root) return 0;
-
-    // Lấy tất cả category buttons (bên trái)
-    const catBtns = Array.from(root.querySelectorAll('button.objectMatching-category-item'));
-    // Lấy tất cả option buttons (bên phải)
-    const optBtns = Array.from(root.querySelectorAll('button.objectMatching-option-item'));
-    
-    console.log(`[NetAcad] objectMatching: ${catBtns.length} cat buttons, ${optBtns.length} opt buttons`);
-
-    console.log(`[NetAcad] Line Matching: ${catBtns.length} categories, ${optBtns.length} options`);
-
-    // Helper: lấy text thuần từ button (bỏ label A/B/C prefix nếu có)
-    function getBtnText(btn) {
-      const inner = btn.querySelector('.objectMatching-category-item-inner, .objectMatching-option-item-inner') || btn;
-      // Lấy text từ .category-item-text nếu có, không thì dùng toàn bộ innerText
-      const textEl = inner.querySelector('.category-item-text') || inner;
-      return normalize((textEl.innerText || '').replace(/^[A-Z]\s+/, '').trim());
-    }
-
-    for (const [catKey, optVal] of Object.entries(mapping)) {
-      const normKey = normalize(catKey);
-      const normVal = normalize(optVal).replace(/^[a-z]\s+/, '').trim();
-
-      // Tìm category button: khớp theo .category-item-text
-      const catBtn = catBtns.find(btn => {
-        const textEl = btn.querySelector('.category-item-text') || btn;
-        const text = normalize(textEl.innerText || '');
-        return text === normKey || 
-               text.includes(normKey.substring(0, 25)) || 
-               normKey.includes(text.substring(0, 25));
-      });
-
-      // Tìm option button: text nằm thẳng trong button
-      const optBtn = optBtns.find(btn => {
-        const text = getBtnText(btn);
-        return text === normVal || 
-               text.includes(normVal) || 
-               normVal.includes(text);
-      });
-
-      if (catBtn && optBtn) {
-        // Click category first, wait for widget state, then click option
-        catBtn.click();
-        // Wait for widget to enter "selection mode" — poll until catBtn has active/selected class
-        await new Promise(r => {
-          let tries = 0;
-          const poll = () => {
-            const isActive = catBtn.classList.contains('is-active') || 
-                             catBtn.classList.contains('selected') || 
-                             catBtn.getAttribute('aria-pressed') === 'true' ||
-                             catBtn.getAttribute('aria-selected') === 'true';
-            if (isActive || tries++ > 20) { r(); return; }
-            setTimeout(poll, 50);
-          };
-          poll();
-        });
-        // Fallback: ensure at least 150ms passed
-        await new Promise(r => setTimeout(r, 150));
-        optBtn.click();
-        await new Promise(r => setTimeout(r, 300));
-        matchCount++;
-        console.log(`[NetAcad] ✅ Matched: "${catKey}" → "${optVal}"`);
-      } else {
-        console.warn(`[NetAcad] ❌ No match: cat="${catKey}"(${!!catBtn}) opt="${optVal}"(${!!optBtn})`);
-        console.log('Available cats:', catBtns.map(b => (b.querySelector('.category-item-text')||b).innerText.trim()));
-        console.log('Available opts:', optBtns.map(b => getBtnText(b)));
-      }
-    }
-  } catch(e) {
-    console.error("[NetAcad] Line Matching error:", e);
+  // ── HELPERS CHUNG ───────────────────────────────────────────
+  function normalize(s) {
+    return (s || "").replace(/<!--.*?-->/g, "").replace(/\s+/g, " ").trim().toLowerCase();
   }
-  return matchCount;
+
+  function fallbackCopy(text, cb) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text || "";
+      ta.style.position = "fixed";
+      ta.style.top = "-9999px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (cb) cb();
+    } catch (e) {}
+  }
+
+  function copyToClipboard(text, btnEl) {
+    const feedback = () => {
+      if (!btnEl) return;
+      const old = btnEl.textContent;
+      btnEl.textContent = "✅ Đã copy!";
+      btnEl.disabled = true;
+      setTimeout(() => { btnEl.textContent = old; btnEl.disabled = false; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || "").then(feedback).catch(() => fallbackCopy(text, feedback));
+    } else {
+      fallbackCopy(text, feedback);
+    }
+  }
+
+  function findMappedValue(mapping, cat) {
+    if (!mapping) return null;
+    if (mapping[cat] != null) return mapping[cat];
+    const wanted = normalize(cat);
+    const key = Object.keys(mapping).find(k => {
+      const nk = normalize(k);
+      return nk === wanted || nk.includes(wanted) || wanted.includes(nk);
+    });
+    return key ? mapping[key] : null;
+  }
+
+  function parseMatchingJson(raw) {
+    try {
+      if (!raw) return {};
+      const cleaned = String(raw).replace(/```json/gi, "").replace(/```/g, "").trim();
+      const obj = JSON.parse(cleaned);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+    } catch (e) {}
+    return {};
+  }
+
+  // ── XÂY DỰNG KHUNG UI (card) CHO 1 CÂU HỎI ─────────────────
+  function cardStyle() {
+    return `
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #ffffff;
+      border: 1px solid #dbeafe;
+      border-left: 4px solid #3b82f6;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(15,23,42,0.08);
+      padding: 10px 12px;
+      margin: 8px 0;
+      font-size: 13px;
+      color: #1e293b;
+      max-width: 560px;
+      line-height: 1.45;
+    `;
+  }
+
+  function smallBtnStyle() {
+    return `
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #334155;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-right: 6px;
+      margin-top: 6px;
+    `;
+  }
+
+  function makeCopyBtn(label, getText) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    btn.style.cssText = smallBtnStyle();
+    btn.addEventListener("mousedown", e => e.preventDefault()); // tránh mất focus/selection trên trang
+    btn.addEventListener("click", () => copyToClipboard(getText(), btn));
+    return btn;
+  }
+
+  function renderBox(qData, index) {
+    const box = document.createElement("div");
+    box.className = "netacad-ai-assistant-ui";
+    box.style.cssText = cardStyle();
+
+    const header = document.createElement("div");
+    header.style.cssText = "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;";
+
+    const qWrap = document.createElement("div");
+    qWrap.style.cssText = "flex:1;white-space:pre-wrap;word-break:break-word;";
+    const qLabel = document.createElement("div");
+    qLabel.textContent = `❓ Câu ${index + 1}`;
+    qLabel.style.cssText = "font-weight:700;color:#0f172a;margin-bottom:2px;";
+    const qText = document.createElement("div");
+    qText.textContent = qData.questionText || "(không đọc được câu hỏi)";
+    qText.style.cssText = "color:#334155;";
+    qWrap.appendChild(qLabel);
+    qWrap.appendChild(qText);
+
+    header.appendChild(qWrap);
+    box.appendChild(header);
+
+    // Nút copy câu hỏi — luôn hiển thị ngay từ đầu
+    const btnRow = document.createElement("div");
+    btnRow.appendChild(makeCopyBtn("📋 Copy câu hỏi", () => qData.questionText || ""));
+    box.appendChild(btnRow);
+
+    const answerArea = document.createElement("div");
+    answerArea.style.cssText = "margin-top:6px;border-top:1px dashed #e2e8f0;padding-top:6px;";
+    box.appendChild(answerArea);
+
+    box._answerArea = answerArea;
+    box._btnRow = btnRow;
+
+    insertBoxNearQuestion(box, qData);
+    return box;
+  }
+
+function insertBoxNearQuestion(box, qData) {
+    let target = null;
+
+    try {
+        target = qData.questionTextElement;
+    } catch (e) {}
+
+    if (!target) {
+        try {
+            target = qData.viewElementForClick || qData.viewElement;
+        } catch (e) {}
+    }
+
+    if (!target) {
+        document.body.appendChild(box);
+        return;
+    }
+
+    box.style.position = "relative";
+    box.style.top = "";
+    box.style.left = "";
+    box.style.zIndex = "";
+    box.style.marginTop = "10px";
+
+    try {
+        // Ưu tiên chèn vào cuối container câu hỏi
+        const container =
+            qData.viewElement ||
+            qData.viewElementForClick ||
+            target.parentElement;
+
+        container.appendChild(box);
+    } catch (e) {
+        document.body.appendChild(box);
+    }
 }
 
+  function showBoxStatus(box, text) {
+    if (!box || !box._answerArea) return;
+    box._answerArea.innerHTML = "";
+    const div = document.createElement("div");
+    div.textContent = text;
+    div.style.cssText = "color:#64748b;font-style:italic;";
+    box._answerArea.appendChild(div);
+  }
 
-// ==========================================
-// ENGINE 2: DROPDOWN
-// ==========================================
-async function autoMatchDropdowns(aiMappingJSON, viewElement) {
-  let matchCount = 0;
-  try {
-    const mapping = JSON.parse(aiMappingJSON.replace(/```json/gi, "").replace(/```/g, ""));
-    const keys = Object.keys(mapping);
-    const root = viewElement.shadowRoot;
-    
-    const allCats = Array.from(root.querySelectorAll('.matching__item-title_inner'));
-    const allBtns = Array.from(root.querySelectorAll('.dropdown__btn'));
+  // ── MCQ: hiển thị + click đáp án ───────────────────────────
+  function renderMcqAnswer(box, qData, answerText) {
+    const area = box._answerArea;
+    area.innerHTML = "";
 
-    for (const categoryKey of keys) {
-      const optionValue = mapping[categoryKey];
-      const catIndex = allCats.findIndex(el => normalize(el.innerText).includes(normalize(categoryKey)) || normalize(categoryKey).includes(normalize(el.innerText)));
-      
-      if (catIndex !== -1 && allBtns[catIndex]) {
-        const targetBtn = allBtns[catIndex];
-        targetBtn.click();
-        await new Promise(r => setTimeout(r, 150)); 
+    const label = document.createElement("div");
+    const isError = typeof answerText === "string" && answerText.startsWith("Error");
+    label.textContent = isError ? "⚠️ Lỗi AI:" : "✅ Đáp án AI:";
+    label.style.cssText = `font-weight:600;color:${isError ? "#dc2626" : "#059669"};margin-bottom:2px;`;
+    area.appendChild(label);
 
-        const options = Array.from(document.querySelectorAll('.dropdown__item-inner'));
-        const optEl = options.find(el => normalize(el.innerText).includes(normalize(optionValue)) || normalize(optionValue).includes(normalize(el.innerText)));
-        
+    const ansText = document.createElement("div");
+    ansText.textContent = answerText || "(không có)";
+    ansText.style.cssText = "white-space:pre-wrap;word-break:break-word;color:#0f172a;";
+    area.appendChild(ansText);
+
+    area.appendChild(makeCopyBtn("📋 Copy đáp án", () => answerText || ""));
+  }
+
+  async function applyMcqClicks(qData, answerText) {
+    if (!answerText || typeof answerText !== "string") return;
+    if (answerText.startsWith("Error")) return;
+    const wanted = answerText.split(" /// ").map(s => normalize(s)).filter(Boolean);
+    if (!wanted.length) return;
+
+    const els = qData.answerElements ? Array.from(qData.answerElements) : [];
+    for (const el of els) {
+      try {
+        const raw = (el.innerText || "").replace(/Option\s*\d*\s*of\s*\d*/gi, "").replace(/\b\d+\s+of\s+\d+\b/gi, "");
+        const txt = normalize(raw);
+        if (!txt) continue;
+        if (wanted.some(w => txt === w || txt.includes(w) || w.includes(txt))) {
+          el.click();
+          await sleep(150);
+        }
+      } catch (e) {}
+    }
+  }
+
+  // ── MATCHING: hiển thị mapping + click theo từng dạng ──────
+  function renderMatchingAnswer(box, qData, mapping) {
+    const area = box._answerArea;
+    area.innerHTML = "";
+
+    const keys = Object.keys(mapping || {});
+    const label = document.createElement("div");
+    label.textContent = keys.length ? "✅ Ghép đáp án AI:" : "⚠️ AI không trả về kết quả ghép hợp lệ.";
+    label.style.cssText = `font-weight:600;color:${keys.length ? "#059669" : "#dc2626"};margin-bottom:2px;`;
+    area.appendChild(label);
+
+    const table = document.createElement("div");
+    table.style.cssText = "color:#0f172a;";
+    keys.forEach(cat => {
+      const row = document.createElement("div");
+      row.textContent = `• ${cat} → ${mapping[cat]}`;
+      table.appendChild(row);
+    });
+    area.appendChild(table);
+
+    if (keys.length) {
+      area.appendChild(makeCopyBtn("📋 Copy đáp án", () =>
+        keys.map(c => `${c} → ${mapping[c]}`).join("\n")
+      ));
+    }
+  }
+
+  function findOptionEl(root, text) {
+    if (!root || !root.querySelectorAll) return null;
+    const wanted = normalize(text);
+    if (!wanted) return null;
+    const opts = Array.from(root.querySelectorAll(".dropdown__item-inner"));
+    return opts.find(o => normalize(o.innerText) === wanted) ||
+           opts.find(o => normalize(o.innerText).includes(wanted) || wanted.includes(normalize(o.innerText)));
+  }
+
+  async function applyDropdownGroupClicks(qData, mapping) {
+    const items = qData.dropdownGroupItems || [];
+    for (const item of items) {
+      const cat = item._netacadCategoryText;
+      const optText = findMappedValue(mapping, cat);
+      if (!optText) continue;
+      try {
+        const itemRoot = item.shadowRoot || item;
+        const btn = itemRoot.querySelector(".dropdown__btn");
+        if (!btn) continue;
+        btn.click();
+        await sleep(180);
+        const optEl = findOptionEl(itemRoot, optText) || findOptionEl(document, optText);
         if (optEl) {
           optEl.click();
-          matchCount++;
         } else {
-          try { targetBtn.click(); } catch(e){} 
+          btn.click(); // đóng dropdown nếu không tìm được lựa chọn khớp
         }
-        await new Promise(r => setTimeout(r, 150)); 
-      }
-    }
-  } catch (e) {
-    console.error("Lỗi Auto Dropdown:", e);
-  }
-  return matchCount;
-}
-
-// ==========================================
-// UI COMPONENTS (Đã bọc chung Wrapper chống mất nút Copy)
-// ==========================================
-function createAiAssistantUI(uiContainerId, copyBtnId) {
-  // 1. Vỏ bọc tổng (Wrapper) chứa cả Copy Button và AI Box
-  const wrapper = document.createElement("div");
-  wrapper.id = uiContainerId;
-  wrapper.className = "netacad-ai-assistant-ui"; 
-  wrapper.style.cssText = "margin-top:16px; display:flex; flex-direction:column; gap:12px;";
-
-  // 2. Nút Copy (Nằm độc lập bên trên)
-  const copyButton = document.createElement("button");
-  copyButton.id = copyBtnId;
-  copyButton.textContent = "📋 Sao chép Q&A";
-  copyButton.style.cssText = "align-self: flex-start; padding:8px 16px; border:1px solid #cbd5e1; border-radius:6px; background:#ffffff; color:#475569; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,0.05); transition:all 0.2s ease;";
-  copyButton.onmouseover = () => { copyButton.style.background = "#f1f5f9"; };
-  copyButton.onmouseout = () => { copyButton.style.background = "#ffffff"; };
-
-  // 3. Khung AI (Nằm bên dưới)
-  const aiBox = document.createElement("div");
-  aiBox.style.cssText = "padding:16px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc;";
-  
-  const titleElement = document.createElement("h5");
-  titleElement.innerHTML = "✨ Gemini AI Suggestion";
-  titleElement.style.cssText = "margin:0 0 8px 0; color:#3b82f6; font-size:14px;";
-  aiBox.appendChild(titleElement);
-
-  const aiAnswerDisplay = document.createElement("p");
-  aiAnswerDisplay.style.cssText = "margin:8px 0; font-size:14px; color:#1e293b;";
-  aiAnswerDisplay.textContent = "Đang phân tích dữ liệu...";
-  aiBox.appendChild(aiAnswerDisplay);
-
-  const refreshButton = document.createElement("button");
-  refreshButton.textContent = "Thử hỏi lại AI";
-  refreshButton.style.cssText = "padding:6px 14px; border-radius:6px; border:none; cursor:pointer; background:#e2e8f0; color:#475569; margin-top:8px;";
-  aiBox.appendChild(refreshButton);
-
-  wrapper.appendChild(copyButton);
-  wrapper.appendChild(aiBox);
-
-  return { wrapper, copyButton, aiAnswerDisplay, refreshButton };
-}
-
-// ==========================================
-// XỬ LÝ CHÍNH
-// ==========================================
-async function processSingleQuestion(viewElement, index, apiKey, preFetchedAiAnswer = null, isMatching = false, extractedData = null) {
-  const uiContainerId = `netacad-ai-q-${index}`;
-  const copyBtnId = `netacad-copy-btn-${index}`;
-  
-  const data = extractedData || await extractQuestionAndAnswers(viewElement, index);
-  if (!data) return;
-
-  // FIX: Nếu UI đã tồn tại và chỉ cần cập nhật kết quả batch, update in-place
-  const existingWrapper = document.getElementById(uiContainerId);
-  if (existingWrapper && preFetchedAiAnswer && preFetchedAiAnswer !== "BATCH_PROCESSING_STARTED") {
-    const existingDisplay = existingWrapper.querySelector('p');
-    if (existingDisplay) {
-      if (!isMatching && !data.isMatching) {
-        const parsed = parseAiAnswers(preFetchedAiAnswer);
-        autoSelectAnswers(data.answerElements, parsed, index);
-        existingDisplay.innerHTML = `✅ Đã chọn AI:<br/>- ` + parsed.join("<br/>- ");
-      }
-      return;
+        await sleep(180);
+      } catch (e) {}
     }
   }
 
-  // Dọn dẹp DOM cũ an toàn
-  if (existingWrapper) existingWrapper.remove();
-  if (viewElement?.shadowRoot) {
-    const oldUi = viewElement.shadowRoot.querySelector(`#${uiContainerId}`);
-    if (oldUi) oldUi.remove();
-  }
-  if (data.questionTextElement && data.questionTextElement.parentNode) {
-    const oldOutUi = data.questionTextElement.parentNode.querySelector(`#${uiContainerId}`);
-    if (oldOutUi) oldOutUi.remove();
-  }
-
-  const { wrapper, copyButton, aiAnswerDisplay, refreshButton } = createAiAssistantUI(uiContainerId, copyBtnId);
-  
-  // Chèn Wrapper chứa cả 2 vào web
-  if (data.questionTextElement && data.questionTextElement.parentNode) {
-    data.questionTextElement.parentNode.insertBefore(wrapper, data.questionTextElement.nextSibling);
-  } else if (viewElement?.shadowRoot) {
-    viewElement.shadowRoot.appendChild(wrapper);
-  }
-
-  // Logic sao chép Q&A
-  copyButton.addEventListener("click", () => {
-    let textToCopy = data.questionText + "\n\n";
-    
-    if (isMatching || data.isMatching) {
-      if (data.categories && data.categories.length > 0) {
-        textToCopy += "Categories:\n";
-        data.categories.forEach((c, i) => textToCopy += `${i+1}. ${c}\n`);
-        textToCopy += "\nOptions:\n";
-        data.options.forEach((o, i) => textToCopy += `- ${o}\n`);
-      }
-    } else {
-      if (data.answerTexts && data.answerTexts.length > 0) {
-        data.answerTexts.forEach((ans, i) => textToCopy += `${i + 1}. ${ans}\n`);
-      } else {
-        textToCopy += "(Không tìm thấy danh sách lựa chọn để copy)\n";
-      }
+  async function applyDropdownClicks(qData, mapping) {
+    const root = (qData.viewElement && (qData.viewElement.shadowRoot || qData.viewElement)) || null;
+    if (!root || !root.querySelectorAll) return;
+    const cats = Array.from(root.querySelectorAll(".matching__item-title_inner"));
+    const btns = Array.from(root.querySelectorAll(".dropdown__btn"));
+    for (let i = 0; i < cats.length && i < btns.length; i++) {
+      const catText = cats[i].innerText;
+      const optText = findMappedValue(mapping, catText);
+      if (!optText) continue;
+      try {
+        btns[i].click();
+        await sleep(180);
+        const optEl = findOptionEl(document, optText) || findOptionEl(root, optText);
+        if (optEl) optEl.click();
+        await sleep(180);
+      } catch (e) {}
     }
+  }
 
-    navigator.clipboard.writeText(textToCopy.trim()).then(() => {
-      const oldText = copyButton.textContent;
-      copyButton.textContent = "✓ Đã chép Q&A!";
-      copyButton.style.background = "#10b981";
-      copyButton.style.color = "white";
-      copyButton.style.borderColor = "#10b981";
-      setTimeout(() => {
-        copyButton.textContent = oldText;
-        copyButton.style.background = "#ffffff";
-        copyButton.style.color = "#475569";
-        copyButton.style.borderColor = "#cbd5e1";
-      }, 1200);
-    });
-  });
+  async function applyLineMatchingClicks(qData, mapping) {
+    let catBtns = qData.categoryButtons ? Array.from(qData.categoryButtons) : [];
+    let optBtns = qData.optionButtons ? Array.from(qData.optionButtons) : [];
 
-  const handleAction = async () => {
-    aiAnswerDisplay.textContent = "Đang hỏi AI...";
-    const imageUrls = data.questionImages || [];
-    const rawRes = await getAiAnswer(data.questionText, (isMatching || data.isMatching) ? { categories: data.categories, options: data.options } : data.answerTexts, apiKey, (isMatching || data.isMatching), imageUrls);
-    
-    if (rawRes.toLowerCase().startsWith("error") || rawRes.toLowerCase().startsWith("lỗi")) {
-      aiAnswerDisplay.textContent = rawRes;
-      return;
+    if ((!catBtns.length || !optBtns.length) && qData.viewElementForClick) {
+      try {
+        const root = qData.viewElementForClick.shadowRoot || qData.viewElementForClick;
+        catBtns = Array.from(root.querySelectorAll("button.objectMatching-category-item"));
+        optBtns = Array.from(root.querySelectorAll("button.objectMatching-option-item"));
+      } catch (e) {}
     }
+    if (!catBtns.length || !optBtns.length) return;
 
-    if (isMatching || data.isMatching) {
-      let clicks = 0;
-      if (data.isDropdown) {
-         clicks = await autoMatchDropdowns(rawRes, viewElement);
-      } else if (data.isLineMatching) {
-         clicks = await autoMatchLinePairs(rawRes, viewElement);
-      } else {
-         clicks = autoMatchDragDrop(data.sourceElements, data.targetElements, rawRes);
-      }
-      const neatJson = rawRes.replace(/```json|```/gi, "").trim();
-      aiAnswerDisplay.innerHTML = `✅ Đã chọn/nối tự động (${clicks} cặp) <br/><pre style="font-size:12px; margin-top:8px; background:#e2e8f0; padding:8px; border-radius:6px; white-space: pre-wrap; font-family: monospace;">${neatJson}</pre>`;
-    } else {
-      const parsed = parseAiAnswers(rawRes);
-      const clicks = autoSelectAnswers(data.answerElements, parsed, index);
-      aiAnswerDisplay.innerHTML = `✅ Đã tự động chọn (${clicks}):<br/>- ` + parsed.join("<br/>- ");
+    for (let i = 0; i < catBtns.length; i++) {
+      const catText = qData.categories[i];
+      const optText = findMappedValue(mapping, catText);
+      if (!optText) continue;
+      const optIdx = (qData.options || []).findIndex(o => normalize(o) === normalize(optText));
+      if (optIdx === -1 || !optBtns[optIdx]) continue;
+      try {
+        catBtns[i].click();
+        await sleep(200);
+        optBtns[optIdx].click();
+        await sleep(300);
+      } catch (e) {}
+    }
+  }
+
+  function simulateDragDrop(source, target) {
+    try {
+      const dt = new DataTransfer();
+      const opts = { bubbles: true, cancelable: true, dataTransfer: dt };
+      source.dispatchEvent(new DragEvent("dragstart", opts));
+      target.dispatchEvent(new DragEvent("dragenter", opts));
+      target.dispatchEvent(new DragEvent("dragover", opts));
+      target.dispatchEvent(new DragEvent("drop", opts));
+      source.dispatchEvent(new DragEvent("dragend", opts));
+    } catch (e) {}
+  }
+
+  async function applyDragDropClicks(qData, mapping) {
+    const targets = qData.targetElements ? Array.from(qData.targetElements) : [];
+    const sources = qData.sourceElements ? Array.from(qData.sourceElements) : [];
+    for (let i = 0; i < targets.length; i++) {
+      const catText = qData.categories[i];
+      const optText = findMappedValue(mapping, catText);
+      if (!optText) continue;
+      const srcIdx = (qData.options || []).findIndex(o => normalize(o) === normalize(optText));
+      if (srcIdx === -1 || !sources[srcIdx]) continue;
+      try {
+        simulateDragDrop(sources[srcIdx], targets[i]);
+        await sleep(300);
+      } catch (e) {}
+    }
+  }
+
+  async function applyMatchingClicks(qData, mapping) {
+    if (!mapping || !Object.keys(mapping).length) return;
+    try {
+      if (qData.isDropdownGroup) await applyDropdownGroupClicks(qData, mapping);
+      else if (qData.isDropdown) await applyDropdownClicks(qData, mapping);
+      else if (qData.isLineMatching) await applyLineMatchingClicks(qData, mapping);
+      else await applyDragDropClicks(qData, mapping);
+    } catch (e) {}
+  }
+
+  // ── REVIEW (đã nộp bài): hiển thị đáp án đúng có sẵn, không cần AI ──
+  window.renderReviewAnswer = function (box, qData) {
+    if (!box || !box._answerArea) return;
+    const area = box._answerArea;
+    area.innerHTML = "";
+
+    const texts = qData.reviewAnswerTexts || [];
+
+    const label = document.createElement("div");
+    label.textContent = texts.length ? "✅ Đáp án đúng:" : "⚠️ Không đọc được đáp án đúng.";
+    label.style.cssText = `font-weight:600;color:${texts.length ? "#059669" : "#dc2626"};margin-bottom:2px;`;
+    area.appendChild(label);
+
+    const ansText = document.createElement("div");
+    ansText.textContent = texts.join(" /// ") || "(không có)";
+    ansText.style.cssText = "white-space:pre-wrap;word-break:break-word;color:#0f172a;";
+    area.appendChild(ansText);
+
+    if (texts.length) {
+      area.appendChild(makeCopyBtn("📋 Copy đáp án", () => texts.join("\n")));
     }
   };
 
-  refreshButton.addEventListener("click", handleAction);
+  // ── HIỂN THỊ BOX NGAY KHI CÓ CÂU HỎI (trước khi AI chạy) ───
+  // Gọi từ scraper.js NGAY khi vừa scrape xong 1 câu hỏi, để nút
+  // "📋 Copy câu hỏi" xuất hiện ngay lập tức trên trang — không cần chờ
+  // AI trả lời. Nếu box cho đúng qData này đã tồn tại rồi thì KHÔNG tạo
+  // lại, chỉ trả về box cũ để các bước sau (processSingleQuestion) cập
+  // nhật nội dung bên trong (answerArea), tránh tạo ra 2 khung rời nhau.
+  window.ensureQuestionBox = function (qData, index) {
+    try {
+      // Chỉ giữ 1 box duy nhất đang hiển thị trên trang tại 1 thời điểm
+      if (
+        window._currentAiBox &&
+        window._currentAiBox.isConnected &&
+        window._currentAiBox !== qData._uiBox
+      ) {
+        window._currentAiBox.remove();
+      }
 
-  if (!preFetchedAiAnswer) {
-    await handleAction();
-  } else {
-    if (!isMatching && !data.isMatching && !preFetchedAiAnswer.includes("BATCH")) {
-       const parsed = parseAiAnswers(preFetchedAiAnswer);
-       autoSelectAnswers(data.answerElements, parsed, index);
-       aiAnswerDisplay.innerHTML = `✅ Đã chọn AI:<br/>- ` + parsed.join("<br/>- ");
-    } else if (preFetchedAiAnswer === "BATCH_PROCESSING_STARTED") {
-       aiAnswerDisplay.textContent = "Đang gửi câu hỏi cho AI, vui lòng đợi...";
+      let box = qData._uiBox;
+      if (!box || !box.isConnected) {
+        box = renderBox(qData, index);
+        qData._uiBox = box;
+        showBoxStatus(box, "🤖 Đang chờ AI...");
+      }
+
+      window._currentAiBox = box;
+      return box;
+    } catch (e) {
+      return null;
     }
-  }
-}
+  };
+
+  // ── ĐIỂM VÀO CHÍNH — GỌI TỪ scraper.js ─────────────────────
+  window.processSingleQuestion = async function (viewElement, index, apiKey, providedAnswer, isMatching, qData) {
+    try {
+      qData = qData || {};
+      qData.viewElement = qData.viewElement || viewElement;
+
+      // Dùng lại đúng 1 khung cho mỗi câu hỏi. Khung này có thể đã được
+      // ensureQuestionBox() tạo từ trước (ngay khi scraper.js vừa scrape
+      // xong câu hỏi, trước khi gọi AI) — ở đây ta CHỈ lấy lại / cập nhật
+      // nội dung bên trong, KHÔNG tạo khung mới, để tránh tách thành 2
+      // khung rời nhau trên trang.
+      const box = window.ensureQuestionBox(qData, index);
+      if (!box) return false;
+
+      if (isMatching) {
+        showBoxStatus(box, "🤖 AI đang phân tích matching...");
+        let mapping = {};
+        try {
+          if (typeof window.getAiAnswer === "function") {
+            const aiRaw = await window.getAiAnswer(
+              qData.questionText,
+              { categories: qData.categories || [], options: qData.options || [] },
+              apiKey,
+              true,
+              qData.questionImages || []
+            );
+            mapping = parseMatchingJson(aiRaw);
+          }
+        } catch (e) {}
+        renderMatchingAnswer(box, qData, mapping);
+        await applyMatchingClicks(qData, mapping);
+        return true;
+      }
+
+      // MCQ — providedAnswer có thể là cờ "đang xử lý" hoặc đáp án cuối cùng
+      if (providedAnswer === "BATCH_PROCESSING_STARTED") {
+        showBoxStatus(box, "🤖 AI đang phân tích...");
+        return true;
+      }
+
+      renderMcqAnswer(box, qData, providedAnswer);
+      await applyMcqClicks(qData, providedAnswer);
+      return true;
+    } catch (err) {
+      console.error("[NetAcad] processSingleQuestion error:", err);
+      return false;
+    }
+  };
+
+})();

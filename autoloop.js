@@ -6,101 +6,15 @@
 (function () {
   "use strict";
 
+  const { sleep, safeQuery, safeQueryAll, walkShadow,
+          findNextBtn, findSubmitBtn, hasMcq,
+          getPageSig, waitPageChange } = window.NetacadUtils;
+
   let _loopActive = false;
-
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-  function safeQuery(root, sel) {
-    try { return root?.querySelector?.(sel) || null; } catch(e) { return null; }
-  }
-  function safeQueryAll(root, sel) {
-    try { return Array.from(root?.querySelectorAll?.(sel) || []); } catch(e) { return []; }
-  }
-
-  // Walk toàn bộ shadow DOM, gọi callback(root) mỗi node
-  function walkShadow(root, callback) {
-    if (!root) return;
-    callback(root);
-    for (const el of safeQueryAll(root, "*")) {
-      if (el.shadowRoot) walkShadow(el.shadowRoot, callback);
-    }
-  }
 
   function sendStatus(text) {
     try { chrome.runtime.sendMessage({ action: "autoLoopStatus", current: 0, text }).catch(() => {}); } catch(e) {}
     window._moduleCompleterStatus?.(text, -1);
-  }
-
-  // ── Lấy signature trang hiện tại ───────────────────────────
-  function getPageSig() {
-    return window.location.href + "||" + document.title;
-  }
-
-  function waitPageChange(oldSig, timeout = 8000) {
-    return new Promise(resolve => {
-      const end = Date.now() + timeout;
-      function poll() {
-        if (!_loopActive) { resolve(false); return; }
-        if (getPageSig() !== oldSig) { setTimeout(() => resolve(true), 700); return; }
-        if (Date.now() > end) { resolve(false); return; }
-        setTimeout(poll, 120);
-      }
-      setTimeout(poll, 400);
-    });
-  }
-
-  // ── TÌM NÚT NEXT (chuyển trang nội dung) ──────────────────
-  function findNextBtn() {
-    let found = null;
-    walkShadow(document.body, root => {
-      if (found) return;
-      for (const btn of safeQueryAll(root, "button, a")) {
-        if (btn.disabled || btn.getAttribute("aria-disabled") === "true") continue;
-        const cls = (btn.className || "");
-        const txt = (btn.innerText || btn.getAttribute("aria-label") || "").toLowerCase().trim();
-        // Selector chính xác từ DOM NetAcad
-        if (cls.includes("next--") || cls.includes("moduleNavBtn--") && cls.includes("next")) {
-          found = btn; break;
-        }
-        // Fallback theo aria-label "Go To ..."
-        if (btn.getAttribute("aria-label")?.startsWith("Go To ")) {
-          // Chỉ lấy nút next, không lấy prev
-          if (cls.toLowerCase().includes("next") || btn.querySelector('[class*="right-arrow"], .icon-right-arrow')) {
-            found = btn; break;
-          }
-        }
-        // Fallback icon right-arrow bên trong
-        if (btn.querySelector('[class*="right-arrow"], .icon-right-arrow')) {
-          if (!btn.querySelector('[class*="left-arrow"], .icon-left-arrow')) {
-            found = btn; break;
-          }
-        }
-      }
-    });
-    return found;
-  }
-
-  // ── TÌM NÚT SUBMIT MCQ ─────────────────────────────────────
-  function findSubmitBtn() {
-    let found = null;
-    walkShadow(document.body, root => {
-      if (found) return;
-      const byClass = safeQuery(root, "button.submit-button:not([disabled])");
-      if (byClass) { found = byClass; return; }
-      const byAria = safeQuery(root, 'button[aria-label="submit"]:not([disabled])');
-      if (byAria) { found = byAria; return; }
-    });
-    return found;
-  }
-
-  // ── KIỂM TRA CÓ MCQ TRÊN TRANG ────────────────────────────
-  function hasMcq() {
-    let found = false;
-    walkShadow(document.body, root => {
-      if (found) return;
-      if (safeQuery(root, "mcq-view, matching-view, dnd-view")) found = true;
-    });
-    return found;
   }
 
   // ── XỬ LÝ VIDEO: tua đến cuối ──────────────────────────────
@@ -182,7 +96,8 @@
   }
 
   // ── XỬ LÝ MCQ: gọi AI, click đáp án, submit ────────────────
-  async function handleMcq(apiKey) {
+  // Hàm này được dùng cho cả autoloop và nút "Quiz AI" (trả lời 1 câu rồi submit)
+  async function handleMcq() {
     // Dùng scrapeData đã có — nó gọi AI + click đáp án
     const scrape = window._netacadOriginalScrapeData || window.scrapeData;
     if (typeof scrape === "function") {
@@ -193,7 +108,7 @@
     // Chờ nút Submit xuất hiện (tối đa 4s)
     let submitBtn = null;
     for (let i = 0; i < 80; i++) {
-      if (!_loopActive) return false;
+      if (window._isAutoLooping && !_loopActive) return false; // autoloop đã bị dừng giữa chừng
       submitBtn = findSubmitBtn();
       if (submitBtn) break;
       await sleep(50);
@@ -248,6 +163,55 @@
     return clicked || submitted;
   }
 
+  // ── DÙNG CHO NÚT "Quiz AI": trả lời câu hiện tại rồi tự submit ──
+  // Khác handleMcq ở chỗ: không phụ thuộc cờ _loopActive (chạy độc lập, 1 lần)
+  window.answerCurrentQuestion = async function () {
+    if (!hasMcq()) {
+      // Không phải MCQ (có thể là matching) -> chỉ scrape, không submit
+      const scrape = window._netacadOriginalScrapeData || window.scrapeData;
+      if (typeof scrape === "function") await scrape();
+      return false;
+    }
+
+    const scrape = window._netacadOriginalScrapeData || window.scrapeData;
+    if (typeof scrape === "function") {
+      sendStatus("🤖 AI đang phân tích câu hỏi...");
+      await scrape();
+    }
+
+    let submitBtn = null;
+    for (let i = 0; i < 80; i++) {
+      submitBtn = findSubmitBtn();
+      if (submitBtn) break;
+      await sleep(50);
+    }
+
+    if (!submitBtn) {
+      let forced = false;
+      walkShadow(document.body, root => {
+        if (forced) return;
+        const mcq = safeQuery(root, "mcq-view");
+        if (mcq?.shadowRoot) {
+          const labels = safeQueryAll(mcq.shadowRoot, ".mcq__item-label, label");
+          if (labels.length > 0) { try { labels[0].click(); forced = true; } catch(e) {} }
+        }
+      });
+      await sleep(500);
+      submitBtn = findSubmitBtn();
+    }
+
+    if (submitBtn) {
+      submitBtn.click();
+      sendStatus("✅ Đã trả lời & nộp câu hỏi");
+      // Chờ trang/câu hỏi đổi sang câu mới (không bắt buộc thành công)
+      const oldSig = getPageSig();
+      await waitPageChange(oldSig, 3000);
+      return true;
+    }
+    sendStatus("⚠️ Không tìm thấy nút Submit");
+    return false;
+  };
+
   // ── MAIN LOOP ───────────────────────────────────────────────
   window.startAutoRunLoop = async function () {
     if (_loopActive) return;
@@ -285,12 +249,12 @@
       // ── BƯỚC 3: Xử lý MCQ nếu có ──
       if (hasMcq()) {
         sendStatus(`❓ Trang ${pageNum} — câu hỏi MCQ`);
-        const submitted = await handleMcq(stored.geminiApiKey);
+        const submitted = await handleMcq();
         if (submitted) {
           await sleep(600);
           // Sau submit MCQ, chờ trang load lại (có thể sang câu tiếp hoặc trang tiếp)
           const oldSig = getPageSig();
-          await waitPageChange(oldSig, 3000);
+          await waitPageChange(oldSig, 3000, () => _loopActive);
           // Kiểm tra xem có phải trang nộp bài cuối không
           const isFinal = await handleFinalSubmit();
           if (isFinal) {
@@ -321,7 +285,7 @@
 
       const oldSig = getPageSig();
       nextBtn.click();
-      const changed = await waitPageChange(oldSig, 8000);
+      const changed = await waitPageChange(oldSig, 8000, () => _loopActive);
       if (!changed) {
         sendStatus("⚠️ Trang không đổi sau Next, dừng lại.");
         break;
@@ -337,10 +301,6 @@
     window._isAutoLooping = false;
     window._moduleCompleterStatus?.("⏹ Đã dừng.", 0);
   };
-
-  // Alias cho module-completer (nút Complete Modules giờ cũng chạy luồng này)
-  window.startModuleCompleter = window.startAutoRunLoop;
-  window.stopModuleCompleter  = window.stopAutoRunLoop;
 
   if (typeof scrapeData === "function") window._netacadOriginalScrapeData = scrapeData;
   else if (typeof window.scrapeData === "function") window._netacadOriginalScrapeData = window.scrapeData;

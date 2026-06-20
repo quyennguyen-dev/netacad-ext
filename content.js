@@ -1,22 +1,26 @@
-console.log("[NetAcad] content.js loaded");
+// ============================================================
+// content.js — ĐIỀU PHỐI CHÍNH
+// Tách 2 panel độc lập: Quiz Panel (AI trả lời) & Auto Panel (automation)
+// ============================================================
+console.log("[NetAcad] content.js v2.1 loaded");
 
+const { makePillBtn } = window.NetacadUtils;
+
+// ── DEBOUNCED SCRAPE (Quiz auto-detect khi đổi trang) ────────
 let _debounce;
 function debouncedScrape() {
   clearTimeout(_debounce);
   _debounce = setTimeout(() => {
-    // NGĂN XUNG ĐỘT KÉP: Bỏ qua hoàn toàn hành động dò trang chạy nền nếu đang ở chế độ Start Auto Run
-    if (window._isAutoLooping) return; 
-
+    if (window._isAutoLooping) return; // Nhường cho autoloop khi đang chạy
     try {
       chrome.storage.sync.get(["processOnSwitch"], (r) => {
-        if (chrome.runtime.lastError) return;
-        if (r.processOnSwitch === false) return;
+        if (chrome.runtime.lastError || r.processOnSwitch === false) return;
         if (typeof window.scrapeData === "function") window.scrapeData();
       });
     } catch (e) {
       console.debug("[NetAcad] Context invalidated.");
     }
-  }, 40); 
+  }, 400);
 }
 
 function initMutationObserver() {
@@ -33,13 +37,112 @@ if (typeof window.scrapeData !== "function" && typeof scrapeData === "function")
   window.scrapeData = scrapeData;
 }
 
-
-// ── PANEL GỘP: Auto Run + Complete Modules ─────────────────────────────────
-function injectPanel() {
-  if (document.getElementById("netacad-panel")) return;
+// ── PANEL QUIZ (góc phải dưới) ────────────────────────────────
+// Trả lời câu hỏi hiện tại bằng AI rồi TỰ ĐỘNG SUBMIT để qua câu mới
+function injectQuizPanel() {
+  if (document.getElementById("netacad-quiz-panel")) return;
 
   const panel = document.createElement("div");
-  panel.id = "netacad-panel";
+  panel.id = "netacad-quiz-panel";
+  panel.style.cssText = `
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 2147483640;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-end;
+  `;
+
+  // Status badge
+  const badge = document.createElement("div");
+  badge.id = "netacad-quiz-badge";
+  badge.style.cssText = `
+    display: none;
+    background: rgba(15,23,42,0.88);
+    color: #f1f5f9;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 5px 12px;
+    border-radius: 20px;
+    max-width: 220px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  `;
+
+  // Nút Quiz AI (xanh dương)
+  const quizBtn = makePillBtn(
+    "🧠", "Quiz AI",
+    "linear-gradient(135deg,#3b82f6,#2563eb)",
+    "0 4px 14px rgba(59,130,246,0.4)"
+  );
+
+  panel.appendChild(badge);
+  panel.appendChild(quizBtn);
+  document.body.appendChild(panel);
+
+  let quizRunning = false;
+
+  function setLoadingUI() {
+    quizBtn.innerHTML = `⏳ <span style="font-size:12px;font-weight:650;">Đang xử lý...</span>`;
+    quizBtn.style.background = "linear-gradient(135deg,#64748b,#475569)";
+    quizBtn.style.boxShadow = "0 4px 14px rgba(100,116,139,0.3)";
+  }
+  function resetUI() {
+    quizBtn.innerHTML = `🧠 <span style="font-size:12px;font-weight:650;">Quiz AI</span>`;
+    quizBtn.style.background = "linear-gradient(135deg,#3b82f6,#2563eb)";
+    quizBtn.style.boxShadow = "0 4px 14px rgba(59,130,246,0.4)";
+  }
+
+  quizBtn.addEventListener("click", async () => {
+    try {
+      const stored = await chrome.storage.sync.get(["geminiApiKey"]);
+      if (!stored.geminiApiKey) {
+        alert("⚠️ Vui lòng nhập API Key trong popup trước!");
+        return;
+      }
+
+      if (!quizRunning) {
+        quizRunning = true;
+        setLoadingUI();
+        badge.textContent = "🧠 AI đang phân tích...";
+        badge.style.display = "block";
+
+        let submitted = false;
+        if (typeof window.answerCurrentQuestion === "function") {
+          // Trả lời + tự submit để qua câu mới
+          submitted = await window.answerCurrentQuestion();
+        } else if (typeof window.scrapeData === "function") {
+          await window.scrapeData();
+        }
+
+        quizRunning = false;
+        resetUI();
+        badge.textContent = submitted ? "✅ Đã trả lời & qua câu mới!" : "✅ Hoàn tất!";
+        setTimeout(() => { badge.style.display = "none"; }, 2000);
+      }
+    } catch (err) {
+      quizRunning = false;
+      resetUI();
+      if (err.message?.includes("context invalidated")) {
+        alert("🔄 Extension vừa cập nhật. Nhấn F5 để reload!");
+      }
+    }
+  });
+}
+
+// ── PANEL AUTO (góc trái dưới) ────────────────────────────────
+// Chỉ còn 1 nút Auto Run (đã gộp với Complete Modules vì cùng chung 1 luồng autoloop)
+function injectAutoPanel() {
+  if (document.getElementById("netacad-auto-panel")) return;
+
+  const panel = document.createElement("div");
+  panel.id = "netacad-auto-panel";
   panel.style.cssText = `
     position: fixed;
     bottom: 24px;
@@ -54,96 +157,55 @@ function injectPanel() {
 
   // Status badge
   const badge = document.createElement("div");
-  badge.id = "netacad-status-badge";
+  badge.id = "netacad-auto-badge";
   badge.style.cssText = `
     display: none;
-    background: rgba(15,23,42,0.92);
+    background: rgba(15,23,42,0.88);
     color: #f1f5f9;
     font-size: 11px;
     font-weight: 500;
-    padding: 5px 11px;
+    padding: 5px 12px;
     border-radius: 20px;
-    max-width: 220px;
+    max-width: 240px;
     backdrop-filter: blur(8px);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   `;
 
-  // Button factory
-  function makeBtn(id, emoji, label, color, shadow) {
-    const btn = document.createElement("button");
-    btn.id = id;
-    btn.innerHTML = `${emoji} <span>${label}</span>`;
-    btn.style.cssText = `
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 10px 18px;
-      border: none;
-      border-radius: 50px;
-      background: ${color};
-      color: #fff;
-      font-size: 13px;
-      font-weight: 650;
-      cursor: pointer;
-      box-shadow: ${shadow};
-      transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s;
-      outline: none;
-      white-space: nowrap;
-      letter-spacing: 0.01em;
-    `;
-    btn.onmouseover = () => { btn.style.transform = "translateY(-2px)"; btn.style.opacity = "0.92"; };
-    btn.onmouseout  = () => { btn.style.transform = "translateY(0)";    btn.style.opacity = "1"; };
-    return btn;
-  }
-
-  const autoBtn = makeBtn(
-    "netacad-auto-btn", "🚀", "Start Auto Run",
+  // Nút Auto Run (xanh lá) — chạy toàn bộ module: video → dialog → MCQ → next
+  const autoBtn = makePillBtn(
+    "🚀", "Auto Run",
     "linear-gradient(135deg,#10b981,#059669)",
     "0 4px 14px rgba(16,185,129,0.4)"
   );
 
-  const modBtn = makeBtn(
-    "netacad-module-btn", "📚", "Complete Modules",
-    "linear-gradient(135deg,#8b5cf6,#7c3aed)",
-    "0 4px 14px rgba(139,92,246,0.4)"
-  );
-
   panel.appendChild(badge);
-  panel.appendChild(modBtn);
   panel.appendChild(autoBtn);
   document.body.appendChild(panel);
 
-  // ── Status helper ────────────────────────────────────────
-  function showBadge(msg) {
-    badge.textContent = msg;
-    badge.style.display = "block";
-  }
-  function hideBadge() {
-    badge.style.display = "none";
-  }
+  function showBadge(msg) { badge.textContent = msg; badge.style.display = "block"; }
+  function hideBadge()    { badge.style.display = "none"; }
 
-  // ── Module completer status callback ────────────────────
+  // Status từ autoloop
   window._moduleCompleterStatus = function(msg, remaining) {
     showBadge(msg);
-    if (remaining === 0) setTimeout(hideBadge, 3000);
+    if (remaining === 0) setTimeout(hideBadge, 2500);
   };
 
-  // ── AUTO RUN button ──────────────────────────────────────
   let autoRunning = false;
 
   window.updateFloatingButtonState = function(running) {
     autoRunning = running;
     if (running) {
-      autoBtn.innerHTML = '⏹ <span>Stop Auto Run</span>';
+      autoBtn.innerHTML = `⏹ <span style="font-size:12px;font-weight:650;">Stop Auto</span>`;
       autoBtn.style.background = "linear-gradient(135deg,#ef4444,#dc2626)";
-      autoBtn.style.boxShadow = "0 4px 14px rgba(239,68,68,0.4)";
+      autoBtn.style.boxShadow  = "0 4px 14px rgba(239,68,68,0.4)";
     } else {
-      autoBtn.innerHTML = '🚀 <span>Start Auto Run</span>';
+      autoBtn.innerHTML = `🚀 <span style="font-size:12px;font-weight:650;">Auto Run</span>`;
       autoBtn.style.background = "linear-gradient(135deg,#10b981,#059669)";
-      autoBtn.style.boxShadow = "0 4px 14px rgba(16,185,129,0.4)";
+      autoBtn.style.boxShadow  = "0 4px 14px rgba(16,185,129,0.4)";
     }
   };
 
@@ -152,7 +214,7 @@ function injectPanel() {
       if (!autoRunning) {
         const stored = await chrome.storage.sync.get(["geminiApiKey"]);
         if (!stored.geminiApiKey) {
-          alert("⚠️ Vui lòng nhập API Key trong popup extension trước!");
+          alert("⚠️ Vui lòng nhập API Key trong popup trước!");
           return;
         }
         window.updateFloatingButtonState(true);
@@ -174,53 +236,15 @@ function injectPanel() {
       }
     }
   });
-
-  // ── COMPLETE MODULES button ──────────────────────────────
-  let modRunning = false;
-
-  modBtn.addEventListener("click", async () => {
-    try {
-      if (!modRunning) {
-        modRunning = true;
-        modBtn.innerHTML = '⏹ <span>Dừng lại</span>';
-        modBtn.style.background = "linear-gradient(135deg,#ef4444,#dc2626)";
-        modBtn.style.boxShadow = "0 4px 14px rgba(239,68,68,0.4)";
-        showBadge("🔍 Đang khởi động...");
-
-        if (typeof window.startModuleCompleter === "function") {
-          await window.startModuleCompleter();
-        } else {
-          showBadge("❌ Module chưa load, thử F5!");
-          setTimeout(hideBadge, 3000);
-        }
-
-        modRunning = false;
-        modBtn.innerHTML = '📚 <span>Complete Modules</span>';
-        modBtn.style.background = "linear-gradient(135deg,#8b5cf6,#7c3aed)";
-        modBtn.style.boxShadow = "0 4px 14px rgba(139,92,246,0.4)";
-      } else {
-        if (typeof window.stopModuleCompleter === "function") window.stopModuleCompleter();
-        modRunning = false;
-        modBtn.innerHTML = '📚 <span>Complete Modules</span>';
-        modBtn.style.background = "linear-gradient(135deg,#8b5cf6,#7c3aed)";
-        modBtn.style.boxShadow = "0 4px 14px rgba(139,92,246,0.4)";
-        hideBadge();
-      }
-    } catch (err) {
-      modRunning = false;
-      if (err.message?.includes("context invalidated")) {
-        alert("🔄 Extension vừa cập nhật. Nhấn F5 để reload!");
-      }
-    }
-  });
 }
 
+// ── KHỞI ĐỘNG ────────────────────────────────────────────────
 (async () => {
   if (!document.querySelector("app-root")) return;
   if (document.readyState !== "complete") {
     await new Promise(r => window.addEventListener("load", r, { once: true }));
   }
-  await new Promise(r => setTimeout(r, 40)); 
+  await new Promise(r => setTimeout(r, 60));
 
   try {
     const s = await chrome.storage.sync.get(["geminiApiKey", "showAnswers"]);
@@ -232,9 +256,11 @@ function injectPanel() {
     }
   } catch (e) {}
 
-  injectPanel();
+  injectQuizPanel(); // góc phải dưới
+  injectAutoPanel(); // góc trái dưới
 })();
 
+// ── MESSAGE LISTENER ──────────────────────────────────────────
 chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
   if (req.action === "processPage") {
     if (!document.querySelector("app-root")) return false;
@@ -257,7 +283,6 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
     }
     sendResponse({ started: true });
     if (typeof window.updateFloatingButtonState === "function") window.updateFloatingButtonState(true);
-
     window.startAutoRunLoop().then(count => {
       if (typeof window.updateFloatingButtonState === "function") window.updateFloatingButtonState(false);
       chrome.runtime.sendMessage({ action: "autoLoopFinished", count }).catch(() => {});
@@ -271,5 +296,6 @@ chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
     sendResponse({ stopped: true });
     return false;
   }
+
   return false;
 });

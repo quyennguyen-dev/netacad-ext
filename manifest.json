@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NetAcad Scraper",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Scrapes questions and answers from NetAcad and uses AI to suggest answers.",
   "permissions": [
     "activeTab",
@@ -14,6 +14,7 @@
         "*://*.netacad.com/*"
       ],
       "js": [
+        "utils.js",
         "api.js",
         "ui.js",
         "scraper.js",
