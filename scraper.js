@@ -310,26 +310,20 @@ async function scrapeData() {
       let viewElements = [];
       let allQuestionsData = [];
 
-      // Dùng walkShadow dùng chung từ utils.js thay vì viết lại logic đệ quy
       const { walkShadow, safeQueryAll } = window.NetacadUtils || {};
 
       for (let attempt = 1; attempt <= 20; attempt++) {
         viewElements = [];
         const appRoot = document.querySelector("app-root");
         if (appRoot && appRoot.shadowRoot && walkShadow) {
-          const dropdownGroups = []; // [{ root, items: [matching-dropdown-view,...] }]
+          const dropdownGroups = []; 
           walkShadow(appRoot.shadowRoot, root => {
             safeQueryAll(root, "mcq-view, matching-view, dnd-view").forEach(m => {
               if (!viewElements.includes(m)) viewElements.push(m);
             });
-            // Tìm objectMatching widget (dạng Line Matching)
             safeQueryAll(root, '[class*="objectMatching__widget"], .component__widget.objectMatching__widget').forEach(w => {
               if (!viewElements.includes(w)) viewElements.push(w);
             });
-            // Dạng MỚI: matching-dropdown-view — mỗi dòng/cặp là 1 custom element
-            // riêng có shadowRoot riêng, nên KHÔNG gộp vào selector chung ở trên.
-            // Các dòng cùng 1 câu hỏi thường là anh em (siblings) nằm trong cùng 1 "root"
-            // (cùng 1 shadowRoot/document cha) → gom theo root để tạo thành 1 câu hỏi.
             const ddItems = safeQueryAll(root, "matching-dropdown-view");
             if (ddItems.length > 0) {
               let group = dropdownGroups.find(g => g.root === root);
@@ -338,8 +332,6 @@ async function scrapeData() {
             }
           });
 
-          // Mỗi group (1 root chứa N matching-dropdown-view) = 1 "view" giả,
-          // đại diện cho 1 câu hỏi matching dạng dropdown mới.
           dropdownGroups.forEach(g => {
             g._isDropdownGroupRoot = true;
             if (!viewElements.includes(g)) viewElements.push(g);
@@ -348,24 +340,42 @@ async function scrapeData() {
 
         if (viewElements.length > 0) {
              for (const [index, view] of viewElements.entries()) {
-               // Câu hỏi này đã được xử lý xong rồi (đã có khung đáp án) → bỏ qua
-               // hoàn toàn. Quan trọng với các trang thi dài có NHIỀU câu hỏi cùng
-               // tồn tại trong DOM 1 lúc: không được coi câu ĐÃ xử lý là "câu mới"
-               // chỉ vì có 1 câu khác trên trang vừa thay đổi.
-               // NGOẠI LỆ: NetAcad là SPA, cùng 1 node có thể chuyển từ "đang làm"
-               // sang "đã nộp bài / review" mà KHÔNG reload trang → vẫn phải quét
-               // lại 1 lần nữa cho trạng thái review (đáp án đúng có sẵn).
-               if (view && !view._isDropdownGroupRoot && view._netacadFullyProcessed) {
-                 const probeRoot = view.shadowRoot || view;
-                 const looksLikeReviewNow = !!(probeRoot && probeRoot.querySelector &&
-                   probeRoot.querySelector(".is-submitted, .show-correct-answer"));
-                 if (!looksLikeReviewNow || view._netacadReviewProcessed) continue;
+               
+               // 1. KIỂM TRA CHÍNH XÁC XEM CÂU HỎI HIỆN TẠI CÓ CÒN KHUNG COPY KHÔNG?
+               let hasBox = false;
+               try {
+                   const root = view.shadowRoot || view;
+                   if (root.querySelector('.netacad-ai-assistant-ui')) {
+                       hasBox = true;
+                   } else if (view.nextElementSibling && view.nextElementSibling.classList.contains('netacad-ai-assistant-ui')) {
+                       hasBox = true;
+                   } else if (view.parentElement && view.parentElement.querySelector('.netacad-ai-assistant-ui')) {
+                       hasBox = true;
+                   }
+               } catch (e) {}
+
+               // 2. NẾU BỊ XÓA (Do Next/Back) -> RESET SẠCH CỜ ĐỂ BẮT BUỘC TẠO LẠI
+               if (!hasBox) {
+                   view._netacadFullyProcessed = false;
+                   view._netacadReviewProcessed = false;
+                   view._netacadProcessed = false;
+                   if (view._isDropdownGroupRoot && view.root) {
+                       view.root._netacadDropdownGroupProcessed = false;
+                   }
+               } else {
+                   // Nếu khung vẫn còn -> Bỏ qua, trừ khi vừa bấm nộp bài chuyển sang chế độ xem đáp án
+                   if (view._netacadFullyProcessed) {
+                       const probeRoot = view.shadowRoot || view;
+                       const looksLikeReviewNow = !!(probeRoot && probeRoot.querySelector &&
+                           probeRoot.querySelector(".is-submitted, .show-correct-answer"));
+                       if (!looksLikeReviewNow || view._netacadReviewProcessed) continue;
+                   }
                }
 
                const ext = await extractQuestionAndAnswers(view, index);
-               if (ext._alreadyProcessed) continue; // bỏ qua nếu đã xử lý rồi (dropdown-group / objectMatching tự quản lý cờ riêng)
+               
+               if (ext._alreadyProcessed && hasBox) continue;
 
-               // ── REVIEW (đã nộp bài) — đáp án đúng có sẵn, KHÔNG gọi AI ──
                if (ext.isReview) {
                  if (window.ensureQuestionBox) window.ensureQuestionBox(ext, index);
                  if (window.renderReviewAnswer && ext._uiBox) window.renderReviewAnswer(ext._uiBox, ext);
@@ -377,13 +387,11 @@ async function scrapeData() {
                }
 
                if (ext.answerTexts.length > 0 || ext.isMatching) {
-                 // Hiện khung "📋 Copy câu hỏi" NGAY khi vừa scrape xong,
-                 // TRƯỚC khi gọi AI (đồng bộ, không chờ batch/matching API).
-                 // qData._uiBox được set lên `ext` ở đây nên khi spread vào
-                 // object bên dưới, `q._uiBox` sẽ được giữ lại — các lần gọi
-                 // processSingleQuestion sau đó chỉ cập nhật nội dung trong
-                 // box này, không tạo khung mới.
                  if (window.ensureQuestionBox) window.ensureQuestionBox(ext, index);
+                 
+                 // ÉP TRÌNH DUYỆT RENDER GIAO DIỆN NGAY LẬP TỨC
+                 await new Promise(r => setTimeout(r, 50)); 
+                 
                  allQuestionsData.push({ ...ext, viewElement: view, originalIndex: index });
                  if (view && !view._isDropdownGroupRoot) view._netacadFullyProcessed = true;
                }
@@ -398,15 +406,16 @@ async function scrapeData() {
       let mcqBatch = [];
       for (const q of allQuestionsData) {
         if (q.isMatching) {
+          await new Promise(r => setTimeout(r, 50)); 
           await processSingleQuestion(q.viewElement, q.originalIndex, storedData.geminiApiKey, null, true, q);
         } else {
-          // FIX LỖI ẨN UI: Khởi tạo giao diện Loading ngay lập tức trước khi gọi Batch API
           await processSingleQuestion(q.viewElement, q.originalIndex, storedData.geminiApiKey, "BATCH_PROCESSING_STARTED", false, q);
           mcqBatch.push({ question: q.questionText, answers: q.answerTexts, qData: q });
         }
       }
 
       if (mcqBatch.length > 0) {
+        await new Promise(r => setTimeout(r, 50)); 
         const batchRes = await getAiAnswersForBatch(mcqBatch, storedData.geminiApiKey);
         for (let i = 0; i < mcqBatch.length; i++) {
           const q = mcqBatch[i].qData;

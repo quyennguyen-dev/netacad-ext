@@ -31,14 +31,31 @@
       for (const btn of safeQueryAll(root, "button, a")) {
         if (btn.disabled || btn.getAttribute("aria-disabled") === "true") continue;
         const cls = (btn.className || "");
-        if (cls.includes("next--") || (cls.includes("moduleNavBtn--") && cls.includes("next"))) {
+        const aria = btn.getAttribute("aria-label") || "";
+        const title = btn.getAttribute("title") || "";
+
+        // 1. Class chứa "next--" (Next button với class hash động, vd: next--3dfUb)
+        if (cls.includes("next--")) { found = btn; break; }
+
+        // 2. Class chứa cả "moduleNavBtn--" và "next" (vd: moduleNavBtn--sFwjV next--3dfUb)
+        if (cls.includes("moduleNavBtn--") && cls.toLowerCase().includes("next")) {
           found = btn; break;
         }
-        if (btn.getAttribute("aria-label")?.startsWith("Go To ")) {
-          if (cls.toLowerCase().includes("next") || btn.querySelector('[class*="right-arrow"], .icon-right-arrow')) {
+
+        // 3. aria-label hoặc title dạng "Go To X.X. ..." (nút điều hướng sang trang kế)
+        if (aria.startsWith("Go To ") || title.startsWith("Go To ")) {
+          // Xác nhận là nút đi TIẾP (có icon mũi tên phải, không có mũi tên trái)
+          if (btn.querySelector('[class*="right-arrow"], .icon-right-arrow')) {
+            if (!btn.querySelector('[class*="left-arrow"], .icon-left-arrow')) {
+              found = btn; break;
+            }
+          } else {
+            // Không có icon nhưng aria/title rõ ràng là "Go To" → chấp nhận
             found = btn; break;
           }
         }
+
+        // 4. Fallback: chỉ có icon mũi tên phải, không có mũi tên trái
         if (btn.querySelector('[class*="right-arrow"], .icon-right-arrow')) {
           if (!btn.querySelector('[class*="left-arrow"], .icon-left-arrow')) {
             found = btn; break;

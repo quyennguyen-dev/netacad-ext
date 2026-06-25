@@ -140,9 +140,34 @@
     header.appendChild(qWrap);
     box.appendChild(header);
 
-    // Nút copy câu hỏi — luôn hiển thị ngay từ đầu
+    // Nút copy luôn hiện và lấy tất cả dữ liệu (câu hỏi + đáp án)
     const btnRow = document.createElement("div");
-    btnRow.appendChild(makeCopyBtn("📋 Copy câu hỏi", () => qData.questionText || ""));
+    btnRow.appendChild(makeCopyBtn("📋 Copy câu hỏi & lựa chọn", () => {
+      let copyText = "";
+      
+      // 1. Lấy câu hỏi (nếu không có thì để chuỗi thông báo)
+      if (qData.questionText && qData.questionText !== "Question text not found") {
+        copyText += qData.questionText;
+      } else {
+        copyText += "(Không có nội dung câu hỏi)";
+      }
+
+      // 2. Lấy các đáp án trắc nghiệm (nếu có)
+      if (qData.answerTexts && qData.answerTexts.length > 0) {
+        copyText += "\n\nCác lựa chọn:\n" + qData.answerTexts.map((ans, i) => `${i + 1}. ${ans}`).join("\n");
+      } 
+      // 3. Lấy các mục của câu hỏi nối Matching (nếu có)
+      else if (qData.isMatching) {
+        if (qData.categories && qData.categories.length > 0) {
+          copyText += "\n\nMục cần ghép:\n" + qData.categories.map(c => `- ${c}`).join("\n");
+        }
+        if (qData.options && qData.options.length > 0) {
+          copyText += "\n\nLựa chọn đáp án:\n" + qData.options.map(o => `- ${o}`).join("\n");
+        }
+      }
+      
+      return copyText.trim();
+    }));
     box.appendChild(btnRow);
 
     const answerArea = document.createElement("div");
@@ -155,7 +180,6 @@
     insertBoxNearQuestion(box, qData);
     return box;
   }
-
 function insertBoxNearQuestion(box, qData) {
     let target = null;
 
@@ -177,17 +201,25 @@ function insertBoxNearQuestion(box, qData) {
     box.style.position = "relative";
     box.style.top = "";
     box.style.left = "";
-    box.style.zIndex = "";
+    box.style.zIndex = "9999"; // Đảm bảo luôn nổi lên trên
     box.style.marginTop = "10px";
 
     try {
-        // Ưu tiên chèn vào cuối container câu hỏi
-        const container =
-            qData.viewElement ||
-            qData.viewElementForClick ||
-            target.parentElement;
-
-        container.appendChild(box);
+        const container = qData.viewElement || qData.viewElementForClick || target.parentElement;
+        
+        // FIX LỖI BỊ ẨN DO SHADOW DOM: 
+        // 1. Nếu có shadowRoot, chèn thẳng vào shadowRoot để không bị ẩn
+        if (container.shadowRoot) {
+            container.shadowRoot.appendChild(box);
+        } 
+        // 2. Nếu không có shadowRoot, chèn ngay bên dưới (kế tiếp) container thay vì nhét vào trong
+        else if (container.parentNode) {
+            container.parentNode.insertBefore(box, container.nextSibling);
+        } 
+        // 3. Fallback
+        else {
+            container.appendChild(box);
+        }
     } catch (e) {
         document.body.appendChild(box);
     }

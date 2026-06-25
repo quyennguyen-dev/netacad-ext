@@ -11,7 +11,8 @@ let _debounce;
 function debouncedScrape() {
   clearTimeout(_debounce);
   _debounce = setTimeout(() => {
-    if (window._isAutoLooping) return; // Nhường cho autoloop khi đang chạy
+    // SỬA DÒNG NÀY: Thêm window._isQuizLooping để chặn xung đột khi Quiz AI đang chạy
+    if (window._isAutoLooping || window._isQuizLooping) return; 
     try {
       chrome.storage.sync.get(["processOnSwitch"], (r) => {
         if (chrome.runtime.lastError || r.processOnSwitch === false) return;
@@ -88,42 +89,61 @@ function injectQuizPanel() {
 
   let quizRunning = false;
 
-  function setLoadingUI() {
-    quizBtn.innerHTML = `⏳ <span style="font-size:12px;font-weight:650;">Đang xử lý...</span>`;
-    quizBtn.style.background = "linear-gradient(135deg,#64748b,#475569)";
-    quizBtn.style.boxShadow = "0 4px 14px rgba(100,116,139,0.3)";
+  function setQuizRunningUI() {
+    quizBtn.innerHTML = `⏹ <span style="font-size:12px;font-weight:650;">Stop Quiz</span>`;
+    quizBtn.style.background = "linear-gradient(135deg,#f59e0b,#d97706)";
+    quizBtn.style.boxShadow = "0 4px 14px rgba(245,158,11,0.4)";
   }
   function resetUI() {
     quizBtn.innerHTML = `🧠 <span style="font-size:12px;font-weight:650;">Quiz AI</span>`;
     quizBtn.style.background = "linear-gradient(135deg,#3b82f6,#2563eb)";
     quizBtn.style.boxShadow = "0 4px 14px rgba(59,130,246,0.4)";
   }
-
+window._quizStatusUpdater = function(msg) {
+    badge.textContent = msg;
+    badge.style.display = "block";
+  };
   quizBtn.addEventListener("click", async () => {
     try {
+      // Đang chạy → Stop
+      if (quizRunning) {
+        if (typeof window.stopQuizLoop === "function") window.stopQuizLoop();
+        quizRunning = false;
+        resetUI();
+        badge.textContent = "⏹ Đã dừng Quiz AI.";
+        setTimeout(() => { badge.style.display = "none"; }, 2000);
+        return;
+      }
+
       const stored = await chrome.storage.sync.get(["geminiApiKey"]);
       if (!stored.geminiApiKey) {
         alert("⚠️ Vui lòng nhập API Key trong popup trước!");
         return;
       }
 
-      if (!quizRunning) {
-        quizRunning = true;
-        setLoadingUI();
-        badge.textContent = "🧠 AI đang phân tích...";
-        badge.style.display = "block";
+      quizRunning = true;
+      setQuizRunningUI();
+      badge.textContent = "🧠 Quiz AI đang chạy...";
+      badge.style.display = "block";
 
-        let submitted = false;
-        if (typeof window.answerCurrentQuestion === "function") {
-          // Trả lời + tự submit để qua câu mới
-          submitted = await window.answerCurrentQuestion();
-        } else if (typeof window.scrapeData === "function") {
-          await window.scrapeData();
-        }
-
+      if (typeof window.answerCurrentQuestion === "function") {
+        window.answerCurrentQuestion().then(() => {
+          quizRunning = false;
+          resetUI();
+          badge.textContent = "✅ Quiz AI hoàn tất!";
+          setTimeout(() => { badge.style.display = "none"; }, 2500);
+        }).catch((err) => {
+          console.error("[NetAcad] Quiz AI error:", err);
+          quizRunning = false;
+          resetUI();
+          badge.textContent = "⚠️ Quiz AI gặp lỗi, đã dừng.";
+          setTimeout(() => { badge.style.display = "none"; }, 3000);
+        });
+      } else if (typeof window.scrapeData === "function") {
+        await window.scrapeData();
         quizRunning = false;
         resetUI();
-        badge.textContent = submitted ? "✅ Đã trả lời & qua câu mới!" : "✅ Hoàn tất!";
+        badge.textContent = "✅ Hoàn tất!";
         setTimeout(() => { badge.style.display = "none"; }, 2000);
       }
     } catch (err) {
